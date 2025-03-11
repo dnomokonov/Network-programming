@@ -1,0 +1,19 @@
+# VS code
+.history
+.vscode
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+obj
+
+# Intermediate files
+*.txt
+/coursework/*.jpeg
+/coursework/*.png
+/coursework/*.pdf
+
+# MacOS file's
+.DS_Store
