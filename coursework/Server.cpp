@@ -32,8 +32,6 @@ struct ClientInfo {
     int socket;
     string room;
     string name;
-    bool uploading = false;
-    string uploadFilename;
 };
 
 struct RoomInfo {
@@ -72,44 +70,6 @@ void setNameClient(ClientInfo &client, string client_name) {
         sendMessage(client.socket, "Welcome, " + client.name + "!\nUse " YELLOW "/help" RESET " to get page of help.");
     } else {
         sendMessage(client.socket, "Error: Name cannot be empty! Try again.");
-    }
-}
-
-void receiveFile(int clientSocket, const string &filename, ClientInfo &client) {
-    char buffer[BUFFER_SIZE];
-    system("mkdir -p uploads");
-    ofstream file("uploads/" + filename, ios::binary);
-
-    if (!file) {
-        sendMessage(clientSocket, "Error: cannot save file.");
-        client.uploading = false;
-        return;
-    }
-
-    int bytesRead;
-    while ((bytesRead = recv(clientSocket, buffer, BUFFER_SIZE, 0)) > 0) {
-        if (strncmp(buffer, "END_FILE", 8) == 0) break;
-        file.write(buffer, bytesRead);
-    }
-
-    file.close();
-    sendMessage(clientSocket, "File uploaded successfully.");
-    client.uploading = false;
-
-    for (auto &other : clients) {
-        if (other.socket != clientSocket && other.room == client.room) {
-            sendMessage(other.socket, "FILE " + filename + " uploaded by " + client.name);
-            
-            ifstream sendFile("uploads/" + filename, ios::binary);
-            if (sendFile) {
-                char fileBuffer[BUFFER_SIZE];
-                while (sendFile.read(fileBuffer, BUFFER_SIZE) || sendFile.gcount()) {
-                    send(other.socket, fileBuffer, sendFile.gcount(), 0);
-                }
-                send(other.socket, "END_FILE", 8, 0);
-                sendFile.close();
-            }
-        }
     }
 }
 
@@ -247,9 +207,21 @@ void commandClientMessage(ClientInfo &client, const string message) {
             return;
         }
 
-        client.uploading = true;
-        client.uploadFilename = filename;
-        sendMessage(client.socket, "READY " + filename);
+        struct sockaddr_in client_addr;
+        socklen_t addr_len = sizeof(client_addr);
+        getpeername(client.socket, (struct sockaddr*)&client_addr, &addr_len);
+        char client_ip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
+
+        auto it = rooms.find(client.room);
+        int num_clients = it->second.clients.size() - 1;
+
+        cout << "Sending START_UPLOAD to " << client.name << ": " << filename << " " << num_clients << endl;
+        sendMessage(client.socket, "START_UPLOAD " + filename + " " + to_string(num_clients));
+
+        cout << "Sending PEER_UPLOAD to room " << client.room << ": " << client_ip << " " << filename << endl;
+        string upload_msg = "PEER_UPLOAD " + string(client_ip) + " " + filename;
+        sendToRoom(client.room, client.socket, upload_msg);
     }
     else if (command == "/help") {
         string allCommand =
@@ -280,7 +252,6 @@ int main() {
     address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
 
-    // странное поведение присваивания порта 
     if (::bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
         perror("Error bind()");
         close(server_fd);
@@ -335,18 +306,38 @@ int main() {
                     cout << it->name << " disconnected" << endl;
                     it = clients.erase(it);
                 } else {
-                    if (it->uploading) {
-                        receiveFile(it->socket, it->uploadFilename, *it);
+                    buffer[valread] = '\0';
+                    string msg = buffer;
+
+                    if (msg.find("P2P_PORT ") == 0) {
+                        string port = msg.substr(9);
+                        string upload_msg = "PEER_UPLOAD_PORT " + port + "\n";
+                        sendToRoom(it->room, it->socket, upload_msg);
+                        ++it;
+                    }
+                    else if (msg.find("FILE_SENT ") == 0) {
+                        string result = it->name + ": " + msg.substr(10);
+                        sendToRoom(it->room, it->socket, result);
+                        sendMessage(it->socket, result);
+                        ++it;
+                    }
+                    else if (msg.find("FILE_RECEIVED ") == 0) {
+                        string result = it->name + " received " + msg.substr(14);
+                        sendToRoom(it->room, it->socket, result);
+                        sendMessage(it->socket, result);
+                        ++it;
+                    }
+                    else if (msg.find("FILE_ERROR") == 0) {
+                        string result = it->name + ": File transfer failed - " + msg.substr(11);
+                        sendToRoom(it->room, it->socket, result);
+                        sendMessage(it->socket, result);
+                        ++it;
+                    }
+                    else if (it->name.empty()) {
+                        setNameClient(*it, msg);
                         ++it;
                     } else {
-                        buffer[valread] = '\0';
-                        string msg = buffer;
-
-                        if (it->name.empty()) {
-                            setNameClient(*it, msg);
-                        } else {
-                            commandClientMessage(*it, msg);
-                        }
+                        commandClientMessage(*it, msg);
                         ++it;
                     }
                 }
@@ -354,6 +345,7 @@ int main() {
                 ++it;
             }
         }
+
     }
 
     close(server_fd);
